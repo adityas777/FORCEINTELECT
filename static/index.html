@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Text-to-SQL Table Retrieval System</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <!-- FontAwesome for Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Custom Style Sheet -->
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <div class="glow-bg"></div>
+    <div class="app-container">
+        <!-- Header -->
+        <header>
+            <div class="logo">
+                <i class="fa-solid fa-database-arrow-up"></i>
+                <h1>Schema<span>Scout</span></h1>
+            </div>
+            <div class="active-badge" id="activeSchemaBadge">
+                <i class="fa-solid fa-circle-check"></i>
+                <span>Active Schema: Default E-Commerce</span>
+            </div>
+        </header>
+
+        <!-- Main Workspace -->
+        <main class="workspace">
+            <!-- Left Side: Controls -->
+            <section class="controls-panel">
+                <!-- Query Box -->
+                <div class="glass-card">
+                    <h2><i class="fa-solid fa-magnifying-glass"></i> Natural Language Query</h2>
+                    <p class="section-desc">Type your database question below to retrieve the ranked tables needed for SQL generation.</p>
+                    
+                    <div class="input-wrapper">
+                        <textarea id="queryInput" placeholder="e.g. Find customers who received refunds for returned products..."></textarea>
+                        <div class="textarea-actions">
+                            <span class="char-count" id="charCount">0 characters</span>
+                            <button id="runBtn" class="primary-btn">
+                                <span>Retrieve Tables</span>
+                                <i class="fa-solid fa-arrow-right"></i>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Preset Queries -->
+                    <div class="presets-section">
+                        <h3>Try Sample Queries</h3>
+                        <div class="presets-grid">
+                            <button class="preset-btn" data-query="Show all products sold by seller &quot;TechZone&quot;.">1. Sellers & Products</button>
+                            <button class="preset-btn" data-query="Find customers who have saved products to their wishlist.">2. Wishlists</button>
+                            <button class="preset-btn" data-query="Find customers who received refunds for returned products.">3. Refund Chain</button>
+                            <button class="preset-btn" data-query="Identify customers who viewed a product multiple times, added it to their wishlist, later purchased it using a coupon, submitted a low-rated review, returned the product, but have not yet received a refund.">4. Complete Multi-Hop Journey</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Schema Upload Box -->
+                <div class="glass-card">
+                    <h2><i class="fa-solid fa-file-arrow-up"></i> Custom Schema Upload</h2>
+                    <p class="section-desc">Upload your own schema in Markdown or JSON format to query against it. All processing runs locally.</p>
+                    
+                    <div class="upload-zone" id="uploadZone">
+                        <input type="file" id="schemaFileInput" accept=".md,.json,.txt" style="display: none;">
+                        <i class="fa-solid fa-cloud-arrow-up upload-icon"></i>
+                        <p class="upload-text">Drag & drop your file here, or <span class="browse-link">browse</span></p>
+                        <p class="file-types">Supports .md (Markdown spec) and .json</p>
+                    </div>
+
+                    <div class="schema-info-box hidden" id="customSchemaInfo">
+                        <div class="info-row">
+                            <i class="fa-solid fa-file-code"></i>
+                            <span id="uploadedFilename" class="filename">schema.md</span>
+                            <button class="remove-btn" id="resetSchemaBtn" title="Reset to default schema"><i class="fa-solid fa-xmark"></i></button>
+                        </div>
+                    </div>
+
+                    <div class="download-templates">
+                        <a href="/schema_design.md" target="_blank" download class="template-link">
+                            <i class="fa-solid fa-download"></i> Download E-Commerce Schema Template (Markdown)
+                        </a>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Right Side: Results & Details -->
+            <section class="results-panel">
+                <div class="glass-card full-height flex-column">
+                    <div class="card-header-row">
+                        <h2><i class="fa-solid fa-list-ol"></i> Retrieval Results</h2>
+                        <div class="results-meta hidden" id="resultsMeta">
+                            <span id="resultCount">0 tables</span>
+                            <span class="meta-dot">•</span>
+                            <span id="responseTime">0ms</span>
+                        </div>
+                    </div>
+
+                    <!-- Empty State -->
+                    <div class="empty-state" id="emptyState">
+                        <div class="empty-icon-wrapper">
+                            <i class="fa-solid fa-circle-nodes"></i>
+                        </div>
+                        <h3>Ready for Retrieval</h3>
+                        <p>Submit a query on the left to see relevant tables ranked by semantic similarity and schema relationships.</p>
+                    </div>
+
+                    <!-- Loading State -->
+                    <div class="loading-state hidden" id="loadingState">
+                        <div class="spinner"></div>
+                        <p>Computing local embeddings & performing graph expansion...</p>
+                    </div>
+
+                    <!-- Results List -->
+                    <div class="results-list hidden" id="resultsList">
+                        <!-- Items injected by JS -->
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+    <script src="/app.js"></script>
+</body>
+</html>
