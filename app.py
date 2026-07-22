@@ -90,5 +90,6 @@ app.mount("/", StaticFiles(directory="static", html=True), name="static")
 
 if __name__ == "__main__":
     import uvicorn
-    # Start on local address
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    # Start on host 0.0.0.0 and port from environment variable for container routing
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
