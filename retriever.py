@@ -306,7 +306,7 @@ class SchemaRetriever:
         doc = f"Table Name: {table.name} {expanded_name} {table.name} {expanded_name}. Description: {table.description} {table.description} {syns}. Columns: {cols_str}."
         return doc
 
-    def search(self, query, top_k=5, alpha=0.45, seed_threshold=0.25, use_graph=True, graph_hops=3):
+    def search(self, query, top_k=5, alpha=0.45, seed_threshold=0.22, use_graph=True, graph_hops=3):
         # 1. BM25 score
         tokenized_query = self._tokenize(query)
         bm25_scores = np.array(self.bm25.get_scores(tokenized_query))
@@ -337,16 +337,25 @@ class SchemaRetriever:
         combined_scores = alpha * dense_scores + (1 - alpha) * bm25_scores
         table_scores = {self.table_names[i]: combined_scores[i] for i in range(len(self.table_names))}
         
-        # Choose seeds dynamically based on score exceeding seed_threshold baseline
-        seeds = []
+        # Determine top raw matching score
+        raw_top_score = max(table_scores.values())
+        
+        # Choose seeds dynamically based on score exceeding seed_threshold baseline (endpoints for bridging)
+        all_seeds = []
         for name, score in table_scores.items():
             if score >= seed_threshold:
-                seeds.append(name)
+                all_seeds.append(name)
                 
+        # Only strong seeds spawn neighbor boosts
+        strong_seed_threshold = 0.50 * raw_top_score
+        strong_seeds = [name for name in all_seeds if table_scores[name] >= strong_seed_threshold]
+        
         # Ensure we have at least the top-1 table as fallback seed
-        if not seeds:
+        if not strong_seeds:
             top_table = max(table_scores, key=table_scores.get)
-            seeds.append(top_table)
+            strong_seeds.append(top_table)
+            if top_table not in all_seeds:
+                all_seeds.append(top_table)
             
         # Bridges & Graph traversal
         graph = nx.Graph()
@@ -357,65 +366,84 @@ class SchemaRetriever:
                     graph.add_edge(t.name, col.ref_table, weight=1.0)
                     
         bridging_tables = set()
-        if len(seeds) >= 2:
-            for i in range(len(seeds)):
-                for j in range(i + 1, len(seeds)):
-                    u = seeds[i]
-                    v = seeds[j]
+        bridging_floors = {}
+        discount = 0.90
+        
+        if len(all_seeds) >= 2:
+            for i in range(len(all_seeds)):
+                for j in range(i + 1, len(all_seeds)):
+                    u = all_seeds[i]
+                    v = all_seeds[j]
                     if graph.has_node(u) and graph.has_node(v):
                         try:
                             # Use Dijkstra's shortest path
                             path = nx.shortest_path(graph, source=u, target=v, weight='weight')
                             if len(path) <= graph_hops + 1:
+                                # Bridging floor relative to the seeds it connects
+                                floor = discount * (table_scores[u] + table_scores[v]) / 2
                                 for node in path:
                                     bridging_tables.add(node)
+                                    bridging_floors[node] = max(bridging_floors.get(node, 0.0), floor)
                         except nx.NetworkXNoPath:
                             pass
                             
         # The candidate tables are seeds + bridges + 1-hop neighbors
         final_scores = {}
-        candidate_tables = set(seeds).union(bridging_tables)
+        candidate_tables = set(all_seeds).union(bridging_tables)
         
         # Initialize final scores with original table scores
         for name in candidate_tables:
             final_scores[name] = table_scores[name]
             
-        # Apply degree-normalized 1-hop neighbor boost (taking the max boost per neighbor)
-        base_boost = 0.50
+        # Apply degree-normalized 1-hop neighbor boost (taking the max boost per neighbor, scaled by seed score)
+        base_boost = 0.80
         neighbor_boosts = {}
-        for u in seeds:
+        for u in strong_seeds:
             if graph.has_node(u):
                 degree = graph.degree(u)
                 if degree > 0:
-                    boost = base_boost / degree
+                    boost = base_boost * table_scores[u] / degree
                     for v in graph.neighbors(u):
                         neighbor_boosts[v] = max(neighbor_boosts.get(v, 0.0), boost)
                             
         for v, boost in neighbor_boosts.items():
             candidate_tables.add(v)
-            final_scores[v] = final_scores.get(v, table_scores[v]) + boost
+            final_scores[v] = max(final_scores.get(v, table_scores[v]), boost)
                             
         # Boost bridging tables to make sure they are preserved and rank well
         for name in bridging_tables:
-            if name not in seeds:
-                final_scores[name] = max(final_scores.get(name, table_scores[name]), 0.45)
+            final_scores[name] = max(final_scores.get(name, table_scores[name]), bridging_floors.get(name, 0.0))
                 
         # Sort candidate tables
         ranked = sorted(final_scores.items(), key=lambda x: x[1], reverse=True)
-        # Adaptive thresholding (apply to all candidate tables)
+        
+        # Gap-based cutoff (elbow method)
         if ranked:
-            # Use the top raw matching score to prevent neighbor boost inflation from raising the cutoff
-            raw_top_score = max(table_scores.values())
-            cutoff = max(raw_top_score * 0.45, 0.22)
-            
-            filtered_ranked = []
-            for name, score in ranked:
-                if score >= cutoff:
-                    filtered_ranked.append((name, score))
-                    
-            if not filtered_ranked and ranked:
-                filtered_ranked.append(ranked[0])
+            if len(ranked) <= 3:
+                return ranked
                 
-            return filtered_ranked
+            max_rel_drop = -1.0
+            cutoff_idx = 0
+            
+            # Find the largest relative drop between consecutive scores (elbow)
+            # We start looking from index i = 2 to ensure we always keep at least 3 tables
+            for i in range(2, len(ranked) - 1):
+                s_curr = ranked[i][1]
+                s_next = ranked[i+1][1]
+                
+                if s_curr >= 0.15:
+                    rel_drop = (s_curr - s_next) / (s_curr + 1e-9)
+                    if rel_drop > max_rel_drop:
+                        max_rel_drop = rel_drop
+                        cutoff_idx = i
+            
+            # If no sharp elbow (relative drop >= 0.18) was detected, keep all tables >= 0.20
+            if max_rel_drop < 0.18:
+                filtered_ranked = [item for item in ranked if item[1] >= 0.20]
+                if not filtered_ranked:
+                    filtered_ranked = [ranked[0]]
+                return filtered_ranked
+                
+            return ranked[:cutoff_idx + 1]
         else:
             return []
