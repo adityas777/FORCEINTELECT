@@ -1,9 +1,11 @@
---- Prompt 1: Show all products sold by seller "TechZone". (2 tables returned) ---
+--- Prompt 1: Show all products sold by seller "TechZone". (3 tables returned) ---
 product
 seller_mst
+tbl_ord_item
 
---- Prompt 2: List all orders where a coupon was applied during checkout. (2 tables returned) ---
+--- Prompt 2: List all orders where a coupon was applied during checkout. (3 tables returned) ---
 tbl_ord_hdr
+tbl_ord_item
 coupon
 
 --- Prompt 3: Find customers who have saved products to their wishlist. (3 tables returned) ---
@@ -11,18 +13,24 @@ wishlist_item
 customer
 product
 
---- Prompt 4: Show products that customers returned after they had already been delivered. (5 tables returned) ---
+--- Prompt 4: Show products that customers returned after they had already been delivered. (10 tables returned) [WARNING: BLOAT DETECTED (>8 tables)] ---
 return_req
+ship_hdr
 customer
 tbl_ord_item
-rfnd_log
 tbl_ord_hdr
+product
+rfnd_log
+warehouse
+review
+cust_addr
 
---- Prompt 5: Find customers who received refunds for returned products. (6 tables returned) ---
+--- Prompt 5: Find customers who received refunds for returned products. (7 tables returned) ---
 return_req
 rfnd_log
 customer
 tbl_ord_item
+product
 pay_trn
 tbl_ord_hdr
 
@@ -32,42 +40,45 @@ seller_mst
 product
 customer
 
---- Prompt 7: Find customers who added products to their cart but later purchased the same products. (4 tables returned) ---
+--- Prompt 7: Find customers who added products to their cart but later purchased the same products. (5 tables returned) ---
 cart_item
 tbl_ord_item
-product
+tbl_ord_hdr
 customer
+product
 
---- Prompt 8: Identify products that were returned, refunded, and later purchased again by the same customer. (5 tables returned) ---
+--- Prompt 8: Identify products that were returned, refunded, and later purchased again by the same customer. (7 tables returned) ---
 return_req
 rfnd_log
 tbl_ord_hdr
+customer
+product
 tbl_ord_item
 pay_trn
 
---- Prompt 9: Find customers who purchased products from different sellers, received shipments from multiple warehouses, returned at least one item, and whose refund has not yet been processed. (10 tables returned) [WARNING: BLOAT DETECTED (>8 tables)] ---
+--- Prompt 9: Find customers who purchased products from different sellers, received shipments from multiple warehouses, returned at least one item, and whose refund has not yet been processed. (11 tables returned) [WARNING: BLOAT DETECTED (>8 tables)] ---
 return_req
 rfnd_log
 tbl_ord_item
 seller_mst
 ship_hdr
-product
 warehouse
+product
 tbl_ord_hdr
+customer
 pay_trn
 inv_stock
 
---- Prompt 10: Identify customers who viewed a product multiple times, added it to their wishlist, later purchased it using a coupon, submitted a low-rated review, returned the product, but have not yet received a refund. (12 tables returned) [WARNING: BLOAT DETECTED (>8 tables)] ---
+--- Prompt 10: Identify customers who viewed a product multiple times, added it to their wishlist, later purchased it using a coupon, submitted a low-rated review, returned the product, but have not yet received a refund. (11 tables returned) [WARNING: BLOAT DETECTED (>8 tables)] ---
 wishlist_item
+review
 return_req
 recently_viewed
-review
 tbl_ord_hdr
 coupon
-cart_item
 rfnd_log
+customer
 product
 tbl_ord_item
-customer
 pay_trn
 

@@ -248,6 +248,28 @@ class SchemaRetriever:
         else:
             self.doc_embeddings = self.model.fit_transform(self.docs).toarray()
         
+    def _stem(self, word):
+        """Very small, conservative suffix stripper -- not a real Porter
+        stemmer, just enough to collapse the common verb/noun-form
+        mismatches (delivered/delivery-ish, purchased/purchase, viewed/
+        viewing/views, returned/returns) that a pure token-match approach
+        (BM25 / TF-IDF, no semantic model) is otherwise blind to. Applied
+        identically to both table documents and queries so they stay
+        comparable."""
+        if len(word) <= 4:
+            return word
+        if word.endswith("ing") and len(word) > 6:
+            return word[:-3]
+        if word.endswith("ies") and len(word) > 5:
+            return word[:-3] + "y"
+        if word.endswith("ed") and len(word) > 5:
+            return word[:-2]
+        if word.endswith("es") and len(word) > 5:
+            return word[:-2]
+        if word.endswith("s") and not word.endswith("ss") and len(word) > 4:
+            return word[:-1]
+        return word
+
     def _tokenize(self, text):
         stopwords = {
             "a", "about", "above", "after", "again", "against", "all", "am", "an", "and", "any", "are", "arent",
@@ -267,7 +289,7 @@ class SchemaRetriever:
             "list", "get", "give", "display", "retrieve", "currently", "are", "have", "who", "been", "already", "but"
         }
         tokens = re.findall(r'\b[a-z_]+\b', text.lower())
-        return [t for t in tokens if t not in stopwords]
+        return [self._stem(t) for t in tokens if t not in stopwords]
         
     def _create_table_doc(self, table):
         # Expand name and columns
@@ -275,6 +297,19 @@ class SchemaRetriever:
         expanded_cols = []
         for col in table.columns:
             expanded_cols.append(col.name)
+            if col.is_fk:
+                # FK columns (e.g. payment_id on rfnd_log) are kept as their raw
+                # compound name only, NOT word-expanded into "payment id".
+                # Expanding them injects the *referenced* table's own core
+                # vocabulary ("payment") as a standalone matchable term on this
+                # table's document -- so any query about payments would also
+                # lexically match rfnd_log purely because it references pay_trn
+                # via FK, even with zero refund context. The FK relationship is
+                # still fully available to the retriever through the graph
+                # (built from col.is_fk / col.ref_table) -- that's the correct
+                # channel for "this table is reachable from that one"; it
+                # shouldn't also leak into lexical scoring.
+                continue
             expanded_cols.append(expand_name(col.name))
         cols_str = " ".join(set(expanded_cols))
         
@@ -290,14 +325,14 @@ class SchemaRetriever:
             "tbl_ord_hdr": "order orders ordered ordering checkout date status total amount bill coupon purchase purchased purchasing purchase purchased purchasing purchase purchased purchasing transaction header placed place",
             "tbl_ord_item": "order item order items products ordered ordering purchase purchased purchasing purchase purchased purchasing purchase purchased purchasing cart quantity price checkout details lines",
             "pay_trn": "payment transaction payments paid paying card cash check billing method record status txn ref",
-            "ship_hdr": "shipment shipments shipping shipped delivery status carrier tracking number tracking_no ship date",
+            "ship_hdr": "shipment shipments shipping shipped delivery delivered deliver status carrier tracking number tracking_no ship date",
             "return_req": "return returns request requests returned returning exchange reason refund request_date status",
-            "rfnd_log": "refund refunds refunded refunding payout payback log payment transaction refund amount status",
+            "rfnd_log": "refund refunds refunded refunding payout payback log refund amount refund status",
             "coupon": "coupon coupons discount discounts promo code offer valid voucher vouchers reduction discount value",
             "review": "review reviews reviewed reviewing rating feedback text stars comment comments critique rating stars",
             "cart_item": "cart item cart items shopping cart basket bag added adding quantity pending checkout",
             "wishlist_item": "wishlist wishlists saved saving favorite favorites bookmark future purchase purchased wishlist id",
-            "recently_viewed": "recently viewed views viewing browse history tracking log clicked viewed history",
+            "recently_viewed": "recently viewed views viewing browse browsing tracking log clicked page visit",
             "recommendation_log": "recommendation recommendations recommended products engine score matching suggested suggested product"
         }
         syns = synonyms.get(table.name.lower(), "")
@@ -344,7 +379,8 @@ class SchemaRetriever:
         # Direct primary terms match boost to scaled scores (capping at 1.0)
         for i, name in enumerate(self.table_names):
             if name in primary_terms:
-                if any(w in tokenized_query for w in primary_terms[name]):
+                stemmed_terms = {self._stem(w) for w in primary_terms[name]}
+                if any(w in tokenized_query for w in stemmed_terms):
                     bm25_scores[i] = min(1.0, bm25_scores[i] + 0.30)
             
         # 2. Dense score
@@ -376,9 +412,9 @@ class SchemaRetriever:
         
         # Log/interaction table unique defining keywords check
         log_keywords = {
-            "cart_item": {"cart", "basket", "shopping", "added"},
+            "cart_item": {"cart", "basket", "shopping"},   # removed "added" -- matched "added to wishlist" too
             "wishlist_item": {"wishlist", "wishlists", "saved", "favorite", "favorites", "bookmark"},
-            "recently_viewed": {"recently", "viewed", "views", "viewing", "browse", "browsed", "history"},
+            "recently_viewed": {"recently", "viewed", "views", "viewing", "browse", "browsed", "browsing"},  # removed "history"
             "recommendation_log": {"recommendation", "recommendations", "recommended", "suggested", "suggest"}
         }
         
@@ -455,14 +491,51 @@ class SchemaRetriever:
                 if degree > 0:
                     boost = base_boost * table_scores[u] / degree
                     for v in graph.neighbors(u):
-                        neighbor_boosts[v] = max(neighbor_boosts.get(v, 0.0), boost)
+                        if table_scores.get(v, 0.0) > 0.0:
+                            neighbor_boosts[v] = max(neighbor_boosts.get(v, 0.0), boost)
+                            
+        # Also propagate a discounted version of the same boost from bridging
+        # tables (not just strong seeds) -- but ONLY from narrow (low-degree)
+        # bridging tables, e.g. tbl_ord_item connecting to product. A bridging
+        # table that is itself a hub (e.g. product, 9 neighbors) must NOT
+        # propagate further -- doing so re-floods the same false positives the
+        # nonzero-score gate was meant to stop, just via a different source.
+        bridge_boost_discount = 0.55
+        bridge_hub_degree_cap = 4
+        for u in bridging_tables:
+            if graph.has_node(u):
+                degree = graph.degree(u)
+                if degree > bridge_hub_degree_cap:
+                    continue
+                u_score = bridging_floors.get(u, table_scores.get(u, 0.0))
+                if degree > 0 and u_score > 0:
+                    boost = bridge_boost_discount * base_boost * u_score / degree
+                    for v in graph.neighbors(u):
+                        if v in strong_seeds or v in bridging_tables:
+                            continue
+                        if table_scores.get(v, 0.0) > 0.0:
+                            neighbor_boosts[v] = max(neighbor_boosts.get(v, 0.0), boost)
                             
         for v, boost in neighbor_boosts.items():
             if v in strong_seeds or v in bridging_tables:
                 final_scores[v] = max(final_scores[v], boost)
             else:
-                final_scores[v] = max(final_scores.get(v, 0.0), boost)
-                
+                # Bug fix: floor must be the candidate's own real base score
+                # (table_scores[v]), not a bare 0.0 -- otherwise real signal
+                # (e.g. product at 0.211) gets silently flattened down to a
+                # smaller structural boost (e.g. 0.05).
+                final_scores[v] = max(final_scores.get(v, table_scores.get(v, 0.0)), boost)
+
+        # Universal log_keywords gate: apply the same gate used for strong_seed
+        # selection to final candidacy too, so a table like cart_item/wishlist_item
+        # that was correctly excluded as a seed can't sneak back in via
+        # neighbor-boost (which otherwise uses its own broad-vocabulary base score
+        # as a floor, bypassing the gate).
+        for name in list(final_scores.keys()):
+            if name in log_keywords and name not in strong_seeds:
+                if not any(kw in query.lower() for kw in log_keywords[name]):
+                    del final_scores[name]
+
         # Sort candidate tables
         ranked = sorted(final_scores.items(), key=lambda x: x[1], reverse=True)
         
