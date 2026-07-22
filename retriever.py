@@ -343,7 +343,7 @@ class SchemaRetriever:
         doc = f"Table Name: {name_boost}. Description: {table.description} {table.description} {syns_boost}. Columns: {cols_str}."
         return doc
 
-    def search(self, query, top_k=5, alpha=0.45, seed_threshold=0.25, use_graph=True, graph_hops=3):
+    def search(self, query, top_k=5, alpha=0.45, seed_threshold=0.25, use_graph=True, graph_hops=5):
         # 1. BM25 score
         tokenized_query = self._tokenize(query)
         bm25_scores = np.array(self.bm25.get_scores(tokenized_query))
@@ -442,7 +442,7 @@ class SchemaRetriever:
                     # Penalize traversing THROUGH a table with zero keyword signal
                     # for this query -- makes it a more "expensive" hop than a table
                     # that's actually relevant, without naming any specific table.
-                    penalty = 1.0 if (has_query_signal(t.name) or has_query_signal(col.ref_table)) else 4.0
+                    penalty = 1.0 if (has_query_signal(t.name) and has_query_signal(col.ref_table)) else 4.0
                     graph.add_edge(t.name, col.ref_table, weight=penalty)
                     
         bridging_tables = set()
@@ -456,6 +456,12 @@ class SchemaRetriever:
                     u = strong_seeds[i]
                     v = strong_seeds[j]
                     if graph.has_node(u) and graph.has_node(v):
+                        # Induced subgraph of already-collected candidates (seeds + bridges found so far)
+                        collected = set(strong_seeds).union(bridging_tables)
+                        sub_collected = graph.subgraph(collected)
+                        # If u and v are already connected in the collected candidates, skip adding a new bridge path
+                        if nx.has_path(sub_collected, u, v):
+                            continue
                         try:
                             # Use Dijkstra's shortest path
                             path = nx.shortest_path(graph, source=u, target=v, weight='weight')
@@ -527,12 +533,39 @@ class SchemaRetriever:
                 # smaller structural boost (e.g. 0.05).
                 final_scores[v] = max(final_scores.get(v, table_scores.get(v, 0.0)), boost)
 
+        # Identify if removing this table would disconnect any pair of strong seeds that are currently connected
+        def is_load_bearing(name_to_remove):
+            if len(strong_seeds) < 2:
+                return False
+            # Build the induced subgraph of candidate tables
+            sub = graph.subgraph(list(final_scores.keys())).copy()
+            if not sub.has_node(name_to_remove):
+                return False
+            # Check connectivity for all pairs of strong seeds
+            # First, check which pairs of strong seeds are connected in sub
+            connected_before = {}
+            for i in range(len(strong_seeds)):
+                for j in range(i + 1, len(strong_seeds)):
+                    u, v = strong_seeds[i], strong_seeds[j]
+                    if sub.has_node(u) and sub.has_node(v):
+                        connected_before[(u, v)] = nx.has_path(sub, u, v)
+            
+            # Now remove the node and check if any connected pair becomes disconnected
+            sub.remove_node(name_to_remove)
+            for (u, v), was_connected in connected_before.items():
+                if was_connected:
+                    if not (sub.has_node(u) and sub.has_node(v) and nx.has_path(sub, u, v)):
+                        return True
+            return False
+
         # Universal keyword gate: for any table that entered final_scores via
         # neighbor-boost or bridge-boost (not as a strong seed itself),
         # ensure it has a real primary term match in the tokenized query.
         # Bridging tables are exempted since they represent valid join paths.
         for name in list(final_scores.keys()):
             if name in strong_seeds or name in bridging_tables:
+                continue
+            if is_load_bearing(name):
                 continue
             terms = primary_terms.get(name, set())
             stemmed_terms = {self._stem(w) for w in terms}
@@ -572,11 +605,23 @@ class SchemaRetriever:
             # fall back to a relative floor tied to the raw top score
             if max_rel_drop < 0.18:
                 cutoff_score = 0.40 * raw_top_score
-                filtered_ranked = [item for item in ranked if item[1] >= cutoff_score]
+                filtered_ranked = []
+                for name, score in ranked:
+                    if name in strong_seeds or name in bridging_tables:
+                        filtered_ranked.append((name, score))
+                    elif score >= cutoff_score:
+                        filtered_ranked.append((name, score))
                 if not filtered_ranked:
                     filtered_ranked = [ranked[0]]
                 return filtered_ranked
                 
-            return ranked[:cutoff_idx + 1]
+            # Filter using cutoff_idx and min_keep_score, but preserve seeds and bridges
+            filtered_ranked = []
+            for idx, (name, score) in enumerate(ranked):
+                if name in strong_seeds or name in bridging_tables:
+                    filtered_ranked.append((name, score))
+                elif score >= min_keep_score or idx <= cutoff_idx:
+                    filtered_ranked.append((name, score))
+            return filtered_ranked
         else:
             return []
