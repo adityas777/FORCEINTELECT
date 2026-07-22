@@ -365,10 +365,10 @@ class SchemaRetriever:
             "rfnd_log": {"refund", "refunds", "refunded"},
             "coupon": {"coupon", "coupons", "discount", "discounts"},
             "review": {"review", "reviews", "rating", "ratings"},
-            "cart_item": {"cart", "basket"},
-            "wishlist_item": {"wishlist", "wishlists"},
-            "recently_viewed": {"viewed", "views", "browse", "browsed"},
-            "recommendation_log": {"recommendation", "recommendations", "recommended"}
+            "cart_item": {"cart", "basket", "shopping"},
+            "wishlist_item": {"wishlist", "wishlists", "saved", "favorite", "favorites", "bookmark"},
+            "recently_viewed": {"recently", "viewed", "views", "viewing", "browse", "browsed", "browsing"},
+            "recommendation_log": {"recommendation", "recommendations", "recommended", "suggested", "suggest"}
         }
         # Min-max scale BM25 first to prevent scale distortion when boosting
         if len(bm25_scores) > 0 and (max(bm25_scores) - min(bm25_scores)) > 1e-9:
@@ -411,18 +411,14 @@ class SchemaRetriever:
         strong_seeds = []
         
         # Log/interaction table unique defining keywords check
-        log_keywords = {
-            "cart_item": {"cart", "basket", "shopping"},   # removed "added" -- matched "added to wishlist" too
-            "wishlist_item": {"wishlist", "wishlists", "saved", "favorite", "favorites", "bookmark"},
-            "recently_viewed": {"recently", "viewed", "views", "viewing", "browse", "browsed", "browsing"},  # removed "history"
-            "recommendation_log": {"recommendation", "recommendations", "recommended", "suggested", "suggest"}
-        }
+        log_tables = {"cart_item", "wishlist_item", "recently_viewed", "recommendation_log"}
         
         for name, score in table_scores.items():
             if score >= strong_seed_threshold:
-                if name in log_keywords:
+                if name in log_tables:
                     # Only allow as seed if at least one unique keyword matches the query
-                    if not any(kw in query.lower() for kw in log_keywords[name]):
+                    terms = primary_terms.get(name, set())
+                    if not any(kw in query.lower() for kw in terms):
                         continue
                 strong_seeds.append(name)
                 
@@ -491,7 +487,7 @@ class SchemaRetriever:
                 if degree > 0:
                     boost = base_boost * table_scores[u] / degree
                     for v in graph.neighbors(u):
-                        if table_scores.get(v, 0.0) > 0.0:
+                        if table_scores.get(v, 0.0) > 0.05:
                             neighbor_boosts[v] = max(neighbor_boosts.get(v, 0.0), boost)
                             
         # Also propagate a discounted version of the same boost from bridging
@@ -513,7 +509,7 @@ class SchemaRetriever:
                     for v in graph.neighbors(u):
                         if v in strong_seeds or v in bridging_tables:
                             continue
-                        if table_scores.get(v, 0.0) > 0.0:
+                        if table_scores.get(v, 0.0) > 0.05:
                             neighbor_boosts[v] = max(neighbor_boosts.get(v, 0.0), boost)
                             
         for v, boost in neighbor_boosts.items():
@@ -526,15 +522,16 @@ class SchemaRetriever:
                 # smaller structural boost (e.g. 0.05).
                 final_scores[v] = max(final_scores.get(v, table_scores.get(v, 0.0)), boost)
 
-        # Universal log_keywords gate: apply the same gate used for strong_seed
-        # selection to final candidacy too, so a table like cart_item/wishlist_item
-        # that was correctly excluded as a seed can't sneak back in via
-        # neighbor-boost (which otherwise uses its own broad-vocabulary base score
-        # as a floor, bypassing the gate).
+        # Universal keyword gate: for any table that entered final_scores via
+        # neighbor-boost or bridge-boost (not as a strong seed itself),
+        # ensure it has a real primary term match in the tokenized query.
         for name in list(final_scores.keys()):
-            if name in log_keywords and name not in strong_seeds:
-                if not any(kw in query.lower() for kw in log_keywords[name]):
-                    del final_scores[name]
+            if name in strong_seeds:
+                continue  # seeds already validated via strong_seed_threshold
+            terms = primary_terms.get(name, set())
+            stemmed_terms = {self._stem(w) for w in terms}
+            if terms and not any(w in tokenized_query for w in stemmed_terms):
+                del final_scores[name]
 
         # Sort candidate tables
         ranked = sorted(final_scores.items(), key=lambda x: x[1], reverse=True)
