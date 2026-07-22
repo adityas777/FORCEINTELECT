@@ -427,18 +427,23 @@ class SchemaRetriever:
             top_table = max(table_scores, key=table_scores.get)
             strong_seeds.append(top_table)
             
+        # Compute per-query relevance for every table using the existing primary_terms check
+        def has_query_signal(name):
+            terms = primary_terms.get(name, set())
+            stemmed = {self._stem(w) for w in terms}
+            return any(w in tokenized_query for w in stemmed)
+
         # Bridges & Graph traversal
         graph = nx.Graph()
-        log_tables = {"cart_item", "wishlist_item", "recently_viewed", "recommendation_log"}
         for t in self.tables:
             graph.add_node(t.name)
             for col in t.columns:
                 if col.is_fk and col.ref_table:
-                    # Prefer core transaction paths by setting higher weight for log/history tables
-                    edge_wt = 1.0
-                    if t.name in log_tables or col.ref_table in log_tables:
-                        edge_wt = 3.0
-                    graph.add_edge(t.name, col.ref_table, weight=edge_wt)
+                    # Penalize traversing THROUGH a table with zero keyword signal
+                    # for this query -- makes it a more "expensive" hop than a table
+                    # that's actually relevant, without naming any specific table.
+                    penalty = 1.0 if (has_query_signal(t.name) or has_query_signal(col.ref_table)) else 4.0
+                    graph.add_edge(t.name, col.ref_table, weight=penalty)
                     
         bridging_tables = set()
         bridging_floors = {}

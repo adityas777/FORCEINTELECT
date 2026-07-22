@@ -63,13 +63,13 @@ inv_stock
 
 --- Prompt 10: Identify customers who viewed a product multiple times, added it to their wishlist, later purchased it using a coupon, submitted a low-rated review, returned the product, but have not yet received a refund. (10 tables returned) [WARNING: BLOAT DETECTED (>8 tables)] ---
 wishlist_item
-review
 return_req
+review
 recently_viewed
 tbl_ord_hdr
 coupon
 rfnd_log
-customer
 product
 tbl_ord_item
+customer
 
