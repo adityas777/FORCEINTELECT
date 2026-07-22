@@ -30,11 +30,16 @@ def main():
     
     with open("evaluation_results.txt", "w", encoding="utf-8") as out:
         for idx, prompt in enumerate(PROMPTS, 1):
-            print(f"--- Prompt {idx}: {prompt} ---")
-            out.write(f"--- Prompt {idx}: {prompt} ---\n")
-            
             results = retriever.search(prompt)
             ranked_names = [name for name, _ in results]
+            
+            # Count check warning
+            count_str = f"({len(ranked_names)} tables returned)"
+            if len(ranked_names) > 8:
+                count_str += " [WARNING: BLOAT DETECTED (>8 tables)]"
+                
+            print(f"--- Prompt {idx}: {prompt} {count_str} ---")
+            out.write(f"--- Prompt {idx}: {prompt} {count_str} ---\n")
             
             for name in ranked_names:
                 print(name)

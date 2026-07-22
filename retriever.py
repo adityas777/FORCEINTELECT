@@ -294,7 +294,7 @@ class SchemaRetriever:
             "return_req": "return returns request requests returned returning exchange reason refund request_date status",
             "rfnd_log": "refund refunds refunded refunding payout payback log payment transaction refund amount status",
             "coupon": "coupon coupons discount discounts promo code offer valid voucher vouchers reduction discount value",
-            "review": "review reviews reviewed reviewing rating feedback text customer customers stars comment comments critique rating stars",
+            "review": "review reviews reviewed reviewing rating feedback text stars comment comments critique rating stars",
             "cart_item": "cart item cart items shopping cart basket bag added adding quantity pending checkout",
             "wishlist_item": "wishlist wishlists saved saving favorite favorites bookmark future purchase purchased wishlist id",
             "recently_viewed": "recently viewed views viewing browse history tracking log clicked viewed history",
@@ -302,20 +302,50 @@ class SchemaRetriever:
         }
         syns = synonyms.get(table.name.lower(), "")
         
-        # Boost table name and description by repeating them
-        doc = f"Table Name: {table.name} {expanded_name} {table.name} {expanded_name}. Description: {table.description} {table.description} {syns}. Columns: {cols_str}."
+        # Boost table name matching weight by repeating name and synonyms 5 times
+        name_boost = " ".join([table.name, expanded_name] * 5)
+        syns_boost = " ".join([syns] * 10)
+        doc = f"Table Name: {name_boost}. Description: {table.description} {table.description} {syns_boost}. Columns: {cols_str}."
         return doc
 
-    def search(self, query, top_k=5, alpha=0.45, seed_threshold=0.22, use_graph=True, graph_hops=3):
+    def search(self, query, top_k=5, alpha=0.45, seed_threshold=0.25, use_graph=True, graph_hops=3):
         # 1. BM25 score
         tokenized_query = self._tokenize(query)
         bm25_scores = np.array(self.bm25.get_scores(tokenized_query))
         
-        # Min-max scale BM25
+        # Direct primary terms match boost to counter IDF dilution
+        primary_terms = {
+            "customer": {"customer", "customers"},
+            "cust_addr": {"address", "addresses", "addr"},
+            "seller_mst": {"seller", "sellers", "vendor", "vendors"},
+            "category": {"category", "categories"},
+            "product": {"product", "products", "item", "items"},
+            "inv_stock": {"stock", "inventory", "qty"},
+            "warehouse": {"warehouse", "warehouses"},
+            "tbl_ord_hdr": {"order", "orders", "purchased"},
+            "tbl_ord_item": {"order", "orders", "item", "items"},
+            "pay_trn": {"payment", "payments", "transaction", "transactions"},
+            "ship_hdr": {"shipment", "shipments", "shipping", "delivery", "delivered"},
+            "return_req": {"return", "returns", "returned"},
+            "rfnd_log": {"refund", "refunds", "refunded"},
+            "coupon": {"coupon", "coupons", "discount", "discounts"},
+            "review": {"review", "reviews", "rating", "ratings"},
+            "cart_item": {"cart", "basket"},
+            "wishlist_item": {"wishlist", "wishlists"},
+            "recently_viewed": {"viewed", "views", "browse", "browsed"},
+            "recommendation_log": {"recommendation", "recommendations", "recommended"}
+        }
+        # Min-max scale BM25 first to prevent scale distortion when boosting
         if len(bm25_scores) > 0 and (max(bm25_scores) - min(bm25_scores)) > 1e-9:
             bm25_scores = (bm25_scores - min(bm25_scores)) / (max(bm25_scores) - min(bm25_scores))
         else:
             bm25_scores = np.zeros_like(bm25_scores)
+            
+        # Direct primary terms match boost to scaled scores (capping at 1.0)
+        for i, name in enumerate(self.table_names):
+            if name in primary_terms:
+                if any(w in tokenized_query for w in primary_terms[name]):
+                    bm25_scores[i] = min(1.0, bm25_scores[i] + 0.30)
             
         # 2. Dense score
         if not self.use_fallback_tfidf:
@@ -340,48 +370,63 @@ class SchemaRetriever:
         # Determine top raw matching score
         raw_top_score = max(table_scores.values())
         
-        # Choose seeds dynamically based on score exceeding seed_threshold baseline (endpoints for bridging)
-        all_seeds = []
-        for name, score in table_scores.items():
-            if score >= seed_threshold:
-                all_seeds.append(name)
-                
-        # Only strong seeds spawn neighbor boosts
-        strong_seed_threshold = 0.50 * raw_top_score
-        strong_seeds = [name for name in all_seeds if table_scores[name] >= strong_seed_threshold]
+        # Choose strong seeds dynamically based on score exceeding 40% of the top raw matching score
+        strong_seed_threshold = 0.40 * raw_top_score
+        strong_seeds = []
         
+        # Log/interaction table unique defining keywords check
+        log_keywords = {
+            "cart_item": {"cart", "basket", "shopping", "added"},
+            "wishlist_item": {"wishlist", "wishlists", "saved", "favorite", "favorites", "bookmark"},
+            "recently_viewed": {"recently", "viewed", "views", "viewing", "browse", "browsed", "history"},
+            "recommendation_log": {"recommendation", "recommendations", "recommended", "suggested", "suggest"}
+        }
+        
+        for name, score in table_scores.items():
+            if score >= strong_seed_threshold:
+                if name in log_keywords:
+                    # Only allow as seed if at least one unique keyword matches the query
+                    if not any(kw in query.lower() for kw in log_keywords[name]):
+                        continue
+                strong_seeds.append(name)
+                
         # Ensure we have at least the top-1 table as fallback seed
         if not strong_seeds:
             top_table = max(table_scores, key=table_scores.get)
             strong_seeds.append(top_table)
-            if top_table not in all_seeds:
-                all_seeds.append(top_table)
             
         # Bridges & Graph traversal
         graph = nx.Graph()
+        log_tables = {"cart_item", "wishlist_item", "recently_viewed", "recommendation_log"}
         for t in self.tables:
             graph.add_node(t.name)
             for col in t.columns:
                 if col.is_fk and col.ref_table:
-                    graph.add_edge(t.name, col.ref_table, weight=1.0)
+                    # Prefer core transaction paths by setting higher weight for log/history tables
+                    edge_wt = 1.0
+                    if t.name in log_tables or col.ref_table in log_tables:
+                        edge_wt = 3.0
+                    graph.add_edge(t.name, col.ref_table, weight=edge_wt)
                     
         bridging_tables = set()
         bridging_floors = {}
-        discount = 0.90
+        discount = 0.55
         
-        if len(all_seeds) >= 2:
-            for i in range(len(all_seeds)):
-                for j in range(i + 1, len(all_seeds)):
-                    u = all_seeds[i]
-                    v = all_seeds[j]
+        # Bridging paths are found ONLY between strong_seeds
+        if len(strong_seeds) >= 2:
+            for i in range(len(strong_seeds)):
+                for j in range(i + 1, len(strong_seeds)):
+                    u = strong_seeds[i]
+                    v = strong_seeds[j]
                     if graph.has_node(u) and graph.has_node(v):
                         try:
                             # Use Dijkstra's shortest path
                             path = nx.shortest_path(graph, source=u, target=v, weight='weight')
                             if len(path) <= graph_hops + 1:
-                                # Bridging floor relative to the seeds it connects
-                                floor = discount * (table_scores[u] + table_scores[v]) / 2
-                                for node in path:
+                                # Bridging floor relative to the seeds it connects (weaker discounted)
+                                floor = discount * min(table_scores[u], table_scores[v])
+                                # Only add intermediate path nodes, not endpoints
+                                for node in path[1:-1]:
                                     bridging_tables.add(node)
                                     bridging_floors[node] = max(bridging_floors.get(node, 0.0), floor)
                         except nx.NetworkXNoPath:
@@ -389,11 +434,17 @@ class SchemaRetriever:
                             
         # The candidate tables are seeds + bridges + 1-hop neighbors
         final_scores = {}
-        candidate_tables = set(all_seeds).union(bridging_tables)
         
-        # Initialize final scores with original table scores
-        for name in candidate_tables:
+        # Initialize final scores ONLY for strong seeds to shield raw scores of non-seeds
+        for name in strong_seeds:
             final_scores[name] = table_scores[name]
+            
+        # Boost bridging tables to make sure they are preserved and rank well
+        for name in bridging_tables:
+            if name in strong_seeds:
+                final_scores[name] = max(final_scores[name], bridging_floors.get(name, 0.0))
+            else:
+                final_scores[name] = bridging_floors.get(name, 0.0)
             
         # Apply degree-normalized 1-hop neighbor boost (taking the max boost per neighbor, scaled by seed score)
         base_boost = 0.80
@@ -407,12 +458,10 @@ class SchemaRetriever:
                         neighbor_boosts[v] = max(neighbor_boosts.get(v, 0.0), boost)
                             
         for v, boost in neighbor_boosts.items():
-            candidate_tables.add(v)
-            final_scores[v] = max(final_scores.get(v, table_scores[v]), boost)
-                            
-        # Boost bridging tables to make sure they are preserved and rank well
-        for name in bridging_tables:
-            final_scores[name] = max(final_scores.get(name, table_scores[name]), bridging_floors.get(name, 0.0))
+            if v in strong_seeds or v in bridging_tables:
+                final_scores[v] = max(final_scores[v], boost)
+            else:
+                final_scores[v] = max(final_scores.get(v, 0.0), boost)
                 
         # Sort candidate tables
         ranked = sorted(final_scores.items(), key=lambda x: x[1], reverse=True)
@@ -437,9 +486,17 @@ class SchemaRetriever:
                         max_rel_drop = rel_drop
                         cutoff_idx = i
             
-            # If no sharp elbow (relative drop >= 0.18) was detected, keep all tables >= 0.20
+            # Ensure we do not discard any candidate scoring >= 0.38 * raw_top_score
+            min_keep_score = 0.38 * raw_top_score
+            for idx, (name, score) in enumerate(ranked):
+                if score >= min_keep_score:
+                    cutoff_idx = max(cutoff_idx, idx)
+            
+            # If no sharp elbow (relative drop >= 0.18) was detected,
+            # fall back to a relative floor tied to the raw top score
             if max_rel_drop < 0.18:
-                filtered_ranked = [item for item in ranked if item[1] >= 0.20]
+                cutoff_score = 0.40 * raw_top_score
+                filtered_ranked = [item for item in ranked if item[1] >= cutoff_score]
                 if not filtered_ranked:
                     filtered_ranked = [ranked[0]]
                 return filtered_ranked
