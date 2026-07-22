@@ -1,3 +1,5 @@
+Deployed Limk : https://schemascout.onrender.com/
+
 # SchemaScout: Text-to-SQL Table Retrieval System
 
 SchemaScout is a local, reproducible stage-1 Text-to-SQL table retrieval system. It takes natural language questions and ranks the database tables by relevance. It operates **entirely offline** using local open-source retrieval methods, with **no external cloud LLM APIs**.
