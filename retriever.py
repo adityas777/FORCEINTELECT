@@ -605,23 +605,11 @@ class SchemaRetriever:
             # fall back to a relative floor tied to the raw top score
             if max_rel_drop < 0.18:
                 cutoff_score = 0.40 * raw_top_score
-                filtered_ranked = []
-                for name, score in ranked:
-                    if name in strong_seeds or name in bridging_tables:
-                        filtered_ranked.append((name, score))
-                    elif score >= cutoff_score:
-                        filtered_ranked.append((name, score))
+                filtered_ranked = [item for item in ranked if item[1] >= cutoff_score]
                 if not filtered_ranked:
                     filtered_ranked = [ranked[0]]
                 return filtered_ranked
                 
-            # Filter using cutoff_idx and min_keep_score, but preserve seeds and bridges
-            filtered_ranked = []
-            for idx, (name, score) in enumerate(ranked):
-                if name in strong_seeds or name in bridging_tables:
-                    filtered_ranked.append((name, score))
-                elif score >= min_keep_score or idx <= cutoff_idx:
-                    filtered_ranked.append((name, score))
-            return filtered_ranked
+            return ranked[:cutoff_idx + 1]
         else:
             return []
