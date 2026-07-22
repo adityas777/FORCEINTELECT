@@ -525,9 +525,10 @@ class SchemaRetriever:
         # Universal keyword gate: for any table that entered final_scores via
         # neighbor-boost or bridge-boost (not as a strong seed itself),
         # ensure it has a real primary term match in the tokenized query.
+        # Bridging tables are exempted since they represent valid join paths.
         for name in list(final_scores.keys()):
-            if name in strong_seeds:
-                continue  # seeds already validated via strong_seed_threshold
+            if name in strong_seeds or name in bridging_tables:
+                continue
             terms = primary_terms.get(name, set())
             stemmed_terms = {self._stem(w) for w in terms}
             if terms and not any(w in tokenized_query for w in stemmed_terms):
