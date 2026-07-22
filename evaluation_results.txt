@@ -6,6 +6,10 @@ seller_mst
 tbl_ord_hdr
 coupon
 pay_trn
+customer
+product
+rfnd_log
+tbl_ord_item
 
 --- Prompt 3: Find customers who have saved products to their wishlist. ---
 wishlist_item
@@ -14,65 +18,90 @@ product
 
 --- Prompt 4: Show products that customers returned after they had already been delivered. ---
 return_req
+wishlist_item
+recently_viewed
 customer
 tbl_ord_item
 product
 tbl_ord_hdr
+recommendation_log
+cart_item
+coupon
+review
+rfnd_log
 
 --- Prompt 5: Find customers who received refunds for returned products. ---
 return_req
 rfnd_log
-pay_trn
+recently_viewed
+wishlist_item
 customer
 tbl_ord_item
-tbl_ord_hdr
 product
+tbl_ord_hdr
+recommendation_log
+pay_trn
+cart_item
+coupon
+review
 
 --- Prompt 6: List sellers whose products have received reviews with ratings below 2. ---
+product
 review
 seller_mst
-product
+customer
+recommendation_log
 
 --- Prompt 7: Find customers who added products to their cart but later purchased the same products. ---
 cart_item
-tbl_ord_hdr
 product
 customer
 tbl_ord_item
+wishlist_item
+recently_viewed
 
 --- Prompt 8: Identify products that were returned, refunded, and later purchased again by the same customer. ---
 return_req
-product
 tbl_ord_item
-customer
-tbl_ord_hdr
-pay_trn
+cart_item
 rfnd_log
+tbl_ord_hdr
+wishlist_item
+product
+customer
+recommendation_log
+recently_viewed
+pay_trn
+review
+cust_addr
 
 --- Prompt 9: Find customers who purchased products from different sellers, received shipments from multiple warehouses, returned at least one item, and whose refund has not yet been processed. ---
-return_req
 rfnd_log
-seller_mst
-customer
-pay_trn
+return_req
+cart_item
+product
 tbl_ord_item
-ship_hdr
 warehouse
 inv_stock
-product
+ship_hdr
+wishlist_item
+seller_mst
 tbl_ord_hdr
+customer
+pay_trn
+recently_viewed
 
 --- Prompt 10: Identify customers who viewed a product multiple times, added it to their wishlist, later purchased it using a coupon, submitted a low-rated review, returned the product, but have not yet received a refund. ---
+tbl_ord_hdr
 cart_item
 wishlist_item
+return_req
+rfnd_log
 recently_viewed
 review
-pay_trn
 coupon
-return_req
-customer
-rfnd_log
 tbl_ord_item
+customer
+pay_trn
 product
-tbl_ord_hdr
 

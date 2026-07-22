@@ -212,30 +212,24 @@ class SchemaRetriever:
         self.tables = tables
         self.table_map = {t.name: t for t in tables}
         
-        # Build FK graph with semantic weights
+        # Build FK graph
         self.graph = nx.Graph()
         for t in tables:
             self.graph.add_node(t.name)
             for col in t.columns:
                 if col.is_fk and col.ref_table:
-                    edge_weight = 1.0
-                    review_tables = {"review"}
-                    peripheral_tables = {"cart_item", "wishlist_item", "recently_viewed", "recommendation_log"}
+                    self.graph.add_edge(t.name, col.ref_table, weight=1.0)
                     
-                    if t.name in peripheral_tables or col.ref_table in peripheral_tables:
-                        edge_weight = 4.0
-                    elif t.name in review_tables or col.ref_table in review_tables:
-                        edge_weight = 2.0
-                        
-                    if self.graph.has_edge(t.name, col.ref_table):
-                        existing_weight = self.graph[t.name][col.ref_table].get('weight', 1.0)
-                        edge_weight = min(edge_weight, existing_weight)
-                        
-                    self.graph.add_edge(t.name, col.ref_table, weight=edge_weight)
-                    
-        # Load embedding model locally
-        self.model = SentenceTransformer(model_name)
-        
+        # Load embedding model locally with TF-IDF fallback
+        try:
+            self.model = SentenceTransformer(model_name)
+            self.use_fallback_tfidf = False
+        except Exception as e:
+            print(f"WARNING: Failed to load SentenceTransformer model '{model_name}'. Falling back to local TF-IDF vectorizer. Error: {e}")
+            from sklearn.feature_extraction.text import TfidfVectorizer
+            self.model = TfidfVectorizer()
+            self.use_fallback_tfidf = True
+            
         # Preprocess documents
         self.docs = []
         self.table_names = []
@@ -248,11 +242,32 @@ class SchemaRetriever:
         self.bm25 = BM25Okapi(tokenized_docs)
         
         # Embed documents
-        self.doc_embeddings = self.model.encode(self.docs, convert_to_tensor=False)
-        self.doc_embeddings = np.array(self.doc_embeddings)
+        if not self.use_fallback_tfidf:
+            self.doc_embeddings = self.model.encode(self.docs, convert_to_tensor=False)
+            self.doc_embeddings = np.array(self.doc_embeddings)
+        else:
+            self.doc_embeddings = self.model.fit_transform(self.docs).toarray()
         
     def _tokenize(self, text):
-        return re.findall(r'\w+', text.lower())
+        stopwords = {
+            "a", "about", "above", "after", "again", "against", "all", "am", "an", "and", "any", "are", "arent",
+            "as", "at", "be", "because", "been", "before", "being", "below", "between", "both", "but", "by", "cant",
+            "cannot", "could", "couldnt", "did", "didnt", "do", "does", "doesnt", "doing", "dont", "down", "during",
+            "each", "few", "for", "from", "further", "had", "hadnt", "has", "hasnt", "have", "havent", "having",
+            "he", "hed", "hell", "hes", "her", "here", "heres", "hers", "herself", "him", "himself", "his", "how",
+            "hows", "i", "id", "ill", "im", "ive", "if", "in", "into", "is", "isnt", "it", "its", "itself", "lets",
+            "me", "more", "most", "mustnt", "my", "myself", "no", "nor", "not", "of", "off", "on", "once", "only",
+            "or", "other", "ought", "our", "ours", "ourselves", "out", "over", "own", "same", "shant", "she",
+            "shed", "shell", "shes", "should", "shouldnt", "so", "some", "such", "than", "that", "thats", "the",
+            "their", "theirs", "them", "themselves", "then", "there", "theres", "these", "they", "theyd", "theyll",
+            "theyre", "theyve", "this", "those", "through", "to", "too", "under", "until", "up", "very", "was",
+            "wasnt", "we", "wed", "well", "were", "weve", "werent", "what", "whats", "when", "whens", "where",
+            "wheres", "which", "while", "who", "whos", "whom", "why", "whys", "with", "wont", "would", "wouldnt",
+            "you", "youd", "youll", "youre", "youve", "your", "yours", "yourself", "yourselves", "show", "find",
+            "list", "get", "give", "display", "retrieve", "currently", "are", "have", "who", "been", "already", "but"
+        }
+        tokens = re.findall(r'\b[a-z_]+\b', text.lower())
+        return [t for t in tokens if t not in stopwords]
         
     def _create_table_doc(self, table):
         # Expand name and columns
@@ -265,24 +280,24 @@ class SchemaRetriever:
         
         # Refined clean synonyms
         synonyms = {
-            "customer": "user customer registered client buyers profile account accounts",
-            "cust_addr": "address addresses shipping billing location home delivery zip postal city state",
-            "seller_mst": "seller sellers vendor vendors merchant merchants shop store rating",
+            "customer": "user customer customers registered client clients buyer buyers buyer's profile account accounts",
+            "cust_addr": "address addresses shipping billing location locations home delivery zip postal city state",
+            "seller_mst": "seller sellers vendor vendors merchant merchants shop shops store stores rating",
             "category": "category categories hierarchy classification classifications labels parent child",
-            "product": "product products item items goods merchandise catalog brand brand name SKU sku",
-            "inv_stock": "inventory stock qty quantity available reserve warehouse level stock_id",
-            "warehouse": "warehouse warehouses storage store depot location city state inventory stock",
-            "tbl_ord_hdr": "order orders checkout date status total amount bill coupon purchase transaction header",
-            "tbl_ord_item": "order item order items products ordered purchase cart quantity price checkout details lines",
-            "pay_trn": "payment transaction payments paid card cash check billing method record status txn ref",
-            "ship_hdr": "shipment shipments shipping delivery status carrier tracking number tracking_no ship date",
-            "return_req": "return returns request returned exchange reason refund request_date status",
-            "rfnd_log": "refund refunds payout payback log payment transaction refund amount status",
-            "coupon": "coupon coupons discount promo code offer valid voucher reduction discount value",
-            "review": "review reviews rating feedback text customer stars comment comments critique rating stars",
-            "cart_item": "cart item cart items shopping cart basket bag added quantity pending checkout",
-            "wishlist_item": "wishlist wishlists saved favorite favorites bookmark future purchase wishlist id",
-            "recently_viewed": "recently viewed browse history tracking log clicked viewed history",
+            "product": "product products item items goods merchandise catalog brand brand name SKU sku stock out of stock out-of-stock",
+            "inv_stock": "inventory stock qty quantity available reserve warehouse level stock_id out of stock out-of-stock",
+            "warehouse": "warehouse warehouses storage store depot location city state inventory stock out of stock out-of-stock",
+            "tbl_ord_hdr": "order orders ordered ordering checkout date status total amount bill coupon purchase purchased purchasing purchase purchased purchasing purchase purchased purchasing transaction header placed place",
+            "tbl_ord_item": "order item order items products ordered ordering purchase purchased purchasing purchase purchased purchasing purchase purchased purchasing cart quantity price checkout details lines",
+            "pay_trn": "payment transaction payments paid paying card cash check billing method record status txn ref",
+            "ship_hdr": "shipment shipments shipping shipped delivery status carrier tracking number tracking_no ship date",
+            "return_req": "return returns request requests returned returning exchange reason refund request_date status",
+            "rfnd_log": "refund refunds refunded refunding payout payback log payment transaction refund amount status",
+            "coupon": "coupon coupons discount discounts promo code offer valid voucher vouchers reduction discount value",
+            "review": "review reviews reviewed reviewing rating feedback text customer customers stars comment comments critique rating stars",
+            "cart_item": "cart item cart items shopping cart basket bag added adding quantity pending checkout",
+            "wishlist_item": "wishlist wishlists saved saving favorite favorites bookmark future purchase purchased wishlist id",
+            "recently_viewed": "recently viewed views viewing browse history tracking log clicked viewed history",
             "recommendation_log": "recommendation recommendations recommended products engine score matching suggested suggested product"
         }
         syns = synonyms.get(table.name.lower(), "")
@@ -291,7 +306,7 @@ class SchemaRetriever:
         doc = f"Table Name: {table.name} {expanded_name} {table.name} {expanded_name}. Description: {table.description} {table.description} {syns}. Columns: {cols_str}."
         return doc
 
-    def search(self, query, top_k=5, alpha=0.55, seed_threshold=0.22, use_graph=True, graph_hops=3):
+    def search(self, query, top_k=5, alpha=0.45, seed_threshold=0.25, use_graph=True, graph_hops=3):
         # 1. BM25 score
         tokenized_query = self._tokenize(query)
         bm25_scores = np.array(self.bm25.get_scores(tokenized_query))
@@ -303,113 +318,53 @@ class SchemaRetriever:
             bm25_scores = np.zeros_like(bm25_scores)
             
         # 2. Dense score
-        query_emb = self.model.encode(query, convert_to_tensor=False)
-        query_emb = np.array(query_emb)
-        norm_query = np.linalg.norm(query_emb)
-        norm_docs = np.linalg.norm(self.doc_embeddings, axis=1)
-        dense_scores = np.dot(self.doc_embeddings, query_emb) / (norm_docs * norm_query + 1e-9)
-        
-        # Min-max scale Dense
-        if len(dense_scores) > 0 and (max(dense_scores) - min(dense_scores)) > 1e-9:
-            dense_scores = (dense_scores - min(dense_scores)) / (max(dense_scores) - min(dense_scores))
+        if not self.use_fallback_tfidf:
+            query_emb = self.model.encode(query, convert_to_tensor=False)
+            query_emb = np.array(query_emb)
+            norm_query = np.linalg.norm(query_emb)
+            norm_docs = np.linalg.norm(self.doc_embeddings, axis=1)
+            dense_scores = np.dot(self.doc_embeddings, query_emb) / (norm_docs * norm_query + 1e-9)
         else:
-            dense_scores = np.zeros_like(dense_scores)
+            query_emb = self.model.transform([query]).toarray()[0]
+            norm_query = np.linalg.norm(query_emb)
+            norm_docs = np.linalg.norm(self.doc_embeddings, axis=1)
+            dense_scores = np.dot(self.doc_embeddings, query_emb) / (norm_docs * norm_query + 1e-9)
+        
+        # Use raw cosine similarity, clipped to [0, 1]
+        dense_scores = np.clip(dense_scores, 0, 1)
             
         # Combined score
         combined_scores = alpha * dense_scores + (1 - alpha) * bm25_scores
         table_scores = {self.table_names[i]: combined_scores[i] for i in range(len(self.table_names))}
         
-        # Apply heuristic filtering for seeds
-        query_lower = query.lower()
-        
-        def check_heuristics(table_name, q_lower):
-            indicators = {
-                "customer": [r"\bcustomer", r"\buser", r"\bclient", r"\bbuyer", r"\bprofile", r"\baccount", r"\bregister"],
-                "product": [r"\bproduct", r"\bitem", r"\bgoods", r"\bmerchandise", r"\bsku", r"\bbrand", r"\bsell"],
-                "category": [r"\bcategory", r"\bcategories", r"\bclassif", r"\bgroup", r"\bparent", r"\bchild"],
-                "inv_stock": [r"\bstock", r"\binventory", r"\bqty", r"\bquantity", r"\bwarehouse", r"\bdepot"],
-                "cart_item": [r"\bcart", r"\bbasket", r"\bbag", r"\badd"],
-                "wishlist_item": [r"\bwishlist", r"\bsave", r"\bbookmark", r"\bfavorite"],
-                "recently_viewed": [r"\bviewed", r"\bbrowse", r"\bhistory", r"\bclick", r"\bvisit", r"\bview\b"],
-                "recommendation_log": [r"\brecommend", r"\bsuggest", r"\balgo"],
-                "rfnd_log": [r"\brefund", r"\bpayback", r"\blog", r"\brepay"],
-                "return_req": [r"\breturn", r"\bexchange", r"\brefund", r"\bpayback"],
-                "review": [r"\breview", r"\brating", r"\bstar", r"\bfeedback", r"\bcomment", r"\bcritique"],
-                "coupon": [r"\bcoupon", r"\bdiscount", r"\bpromo", r"\bvoucher", r"\bcheckout"],
-                "ship_hdr": [r"\bship", r"\bdelivery", r"\bcarrier", r"\btrack", r"\bdeliver"],
-                "pay_trn": [r"\bpayment", r"\bpaid", r"\btxn", r"\btransaction", r"\bpay\b", r"\bcheckout"],
-                "seller_mst": [r"\bseller", r"\bmerchant", r"\bvendor", r"\brating"],
-                "cust_addr": [r"\baddress", r"\bshipping", r"\bbilling", r"\bcity", r"\bstate", r"\bpostal", r"\baddr"],
-                "warehouse": [r"\bwarehouse", r"\bstock", r"\binventory", r"\bdepot", r"\bfulfillment", r"\bshipment"],
-                "tbl_ord_hdr": [r"\border", r"\bpurchase", r"\bcheckout", r"\bbought", r"\bplaced"],
-                "tbl_ord_item": [r"\bitem", r"\border\s+item", r"\bqty", r"\bquantity", r"\bprice", r"\bdiscount", r"\border\b", r"\bpurchase"]
-            }
-            name_lower = table_name.lower()
-            if name_lower in indicators:
-                return any(re.search(pattern, q_lower) is not None for pattern in indicators[name_lower])
-            return True
-
-        # Filter all table scores by heuristics first to eliminate irrelevant candidates
-        valid_table_scores = {}
-        for name, score in table_scores.items():
-            if check_heuristics(name, query_lower):
-                valid_table_scores[name] = score
-                
-        if not valid_table_scores:
-            valid_table_scores = table_scores
-            
-        # Choose seeds dynamically based on score from valid candidates
+        # Choose seeds dynamically based on score exceeding seed_threshold baseline
         seeds = []
-        for name, score in valid_table_scores.items():
+        for name, score in table_scores.items():
             if score >= seed_threshold:
                 seeds.append(name)
                 
-        # Ensure we have at least the top-1 table from the valid set
-        top_table = max(valid_table_scores, key=valid_table_scores.get)
-        if top_table not in seeds:
+        # Ensure we have at least the top-1 table as fallback seed
+        if not seeds:
+            top_table = max(table_scores, key=table_scores.get)
             seeds.append(top_table)
             
-        # Bridges
+        # Bridges & Graph traversal
+        graph = nx.Graph()
+        for t in self.tables:
+            graph.add_node(t.name)
+            for col in t.columns:
+                if col.is_fk and col.ref_table:
+                    graph.add_edge(t.name, col.ref_table, weight=1.0)
+                    
         bridging_tables = set()
-        if use_graph and len(seeds) >= 2:
-            # Build query-specific graph dynamically
-            graph = nx.Graph()
-            for t in self.tables:
-                graph.add_node(t.name)
-                for col in t.columns:
-                    if col.is_fk and col.ref_table:
-                        edge_weight = 1.0
-                        review_tables = {"review"}
-                        peripheral_tables = {"cart_item", "wishlist_item", "recently_viewed", "recommendation_log"}
-                        
-                        if t.name in peripheral_tables or col.ref_table in peripheral_tables:
-                            edge_weight = 4.0
-                        elif t.name in review_tables or col.ref_table in review_tables:
-                            edge_weight = 2.0
-                            
-                        # Adjust weights dynamically based on query
-                        if t.name in peripheral_tables or t.name in review_tables:
-                            if check_heuristics(t.name, query_lower):
-                                edge_weight = 1.0
-                                
-                        ref_tbl = col.ref_table
-                        if ref_tbl in peripheral_tables or ref_tbl in review_tables:
-                            if check_heuristics(ref_tbl, query_lower):
-                                edge_weight = 1.0
-                                
-                        if graph.has_edge(t.name, ref_tbl):
-                            existing_weight = graph[t.name][ref_tbl].get('weight', 1.0)
-                            edge_weight = min(edge_weight, existing_weight)
-                            
-                        graph.add_edge(t.name, ref_tbl, weight=edge_weight)
-                        
+        if len(seeds) >= 2:
             for i in range(len(seeds)):
                 for j in range(i + 1, len(seeds)):
                     u = seeds[i]
                     v = seeds[j]
                     if graph.has_node(u) and graph.has_node(v):
                         try:
-                            # Use Dijkstra's shortest path with dynamic query weights
+                            # Use Dijkstra's shortest path
                             path = nx.shortest_path(graph, source=u, target=v, weight='weight')
                             if len(path) <= graph_hops + 1:
                                 for node in path:
@@ -417,17 +372,50 @@ class SchemaRetriever:
                         except nx.NetworkXNoPath:
                             pass
                             
-        # The candidate tables are seeds + bridges
+        # The candidate tables are seeds + bridges + 1-hop neighbors
+        final_scores = {}
         candidate_tables = set(seeds).union(bridging_tables)
         
-        # Rank candidate tables
-        final_scores = {}
+        # Initialize final scores with original table scores
         for name in candidate_tables:
-            score = table_scores[name]
-            if name in bridging_tables and name not in seeds:
-                score = max(score, 0.45)
-            final_scores[name] = score
+            final_scores[name] = table_scores[name]
             
+        # Apply degree-normalized 1-hop neighbor boost (taking the max boost per neighbor)
+        base_boost = 0.50
+        neighbor_boosts = {}
+        for u in seeds:
+            if graph.has_node(u):
+                degree = graph.degree(u)
+                if degree > 0:
+                    boost = base_boost / degree
+                    for v in graph.neighbors(u):
+                        neighbor_boosts[v] = max(neighbor_boosts.get(v, 0.0), boost)
+                            
+        for v, boost in neighbor_boosts.items():
+            candidate_tables.add(v)
+            final_scores[v] = final_scores.get(v, table_scores[v]) + boost
+                            
+        # Boost bridging tables to make sure they are preserved and rank well
+        for name in bridging_tables:
+            if name not in seeds:
+                final_scores[name] = max(final_scores.get(name, table_scores[name]), 0.45)
+                
         # Sort candidate tables
         ranked = sorted(final_scores.items(), key=lambda x: x[1], reverse=True)
-        return ranked
+        # Adaptive thresholding (apply to all candidate tables)
+        if ranked:
+            # Use the top raw matching score to prevent neighbor boost inflation from raising the cutoff
+            raw_top_score = max(table_scores.values())
+            cutoff = max(raw_top_score * 0.45, 0.22)
+            
+            filtered_ranked = []
+            for name, score in ranked:
+                if score >= cutoff:
+                    filtered_ranked.append((name, score))
+                    
+            if not filtered_ranked and ranked:
+                filtered_ranked.append(ranked[0])
+                
+            return filtered_ranked
+        else:
+            return []
